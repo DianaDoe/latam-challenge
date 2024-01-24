@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import pickle
+import os
 from sklearn.model_selection import train_test_split
 
 from typing import Tuple, Union, List
@@ -12,9 +13,8 @@ from challenge import utils
 class DelayModel:
 
     def __init__(self):
-        self._base_model = xgb.XGBClassifier(random_state=1, learning_rate=0.01)
-        self._model = self.__load_model()
-
+        self._base_model = self.__load_model("latam_base_model.pkl")
+        self._model = self.__load_model("latam_model.pkl")
     def preprocess(
             self,
             data: pd.DataFrame,
@@ -38,24 +38,31 @@ class DelayModel:
             pd.get_dummies(data['MES'], prefix='MES')],
             axis=1
         )
-
-        threshold_in_minutes = 15
-        data['min_diff'] = data.apply(utils.get_min_diff, axis=1)
-        data['delay'] = np.where(data['min_diff'] > threshold_in_minutes, 1, 0)
-        data['high_season'] = data['Fecha-I'].apply(utils.is_high_season)
-        data['period_day'] = data['Fecha-I'].apply(utils.get_period_day)
-
-        target = data[target_column] if target_column is not None else data["delay"]
-
-        x_train, x_test, y_train, y_test = train_test_split(features, target, test_size=0.33, random_state=42)
-        self._base_model.fit(x_train, y_train)
-        feature_important = self._base_model.get_booster().get_score(importance_type='weight')
-        top_10_features = [k for k, v in sorted(feature_important.items(), key=lambda item: item[1], reverse=True)][:10]
-
         if target_column is not None:
+            threshold_in_minutes = 15
+            data['min_diff'] = data.apply(utils.get_min_diff, axis=1)
+            data['delay'] = np.where(data['min_diff'] > threshold_in_minutes, 1, 0)
+            data['high_season'] = data['Fecha-I'].apply(utils.is_high_season)
+            data['period_day'] = data['Fecha-I'].apply(utils.get_period_day)
+
+            target = data[target_column] if target_column is not None else data["delay"]
+
+            x_train, x_test, y_train, y_test = train_test_split(features, target, test_size=0.33, random_state=42)
+            self._base_model.fit(x_train, y_train)
+            if self._model is None:
+                self.__save_model(self._base_model, "latam_base_model.pkl")
+            feature_important = self._base_model.get_booster().get_score(importance_type='weight')
+            top_10_features = [k for k, v in sorted(feature_important.items(), key=lambda item: item[1], reverse=True)][
+                              :10]
+
+
             return features[top_10_features], target.to_frame()
         else:
-            return features[top_10_features]
+            feature_important = self._base_model.get_booster().get_score(importance_type='weight')
+            top_10_features = [k for k, v in sorted(feature_important.items(), key=lambda item: item[1], reverse=True)][
+                              :10]
+            valid_features = [feature for feature in top_10_features if feature in features.columns]
+            return features[valid_features]
 
     def fit(
             self,
@@ -75,7 +82,7 @@ class DelayModel:
         scale = utils.get_data_balance(target)
         self._model = xgb.XGBClassifier(random_state=1, learning_rate=0.01, scale_pos_weight=scale)
         self._model.fit(features, target)
-        self.__save_model(self._model)
+        self.__save_model(self._model, "latam_model.pkl")
 
     def predict(
             self,
@@ -90,20 +97,20 @@ class DelayModel:
         Returns:
             (List[int]): predicted targets.
         """
-
         predicted_target = self._model.predict(
             features
         )
         return [int(value) for value in list(predicted_target)]
 
-    def __save_model(self, model) -> None:
-        model_pkl_file = "latam_model.pkl"
-        pickle.dump(model, open(model_pkl_file, 'wb'))
+    def __save_model(self, model, model_pkl_file) -> None:
+        pickle.dump(model, open(f"models/{model_pkl_file}", 'wb'))
 
-    def __load_model(self):
-        model_pkl_file = "latam_model.pkl"
-        try:
-            loaded_model = pickle.load(open(model_pkl_file, 'rb'))
+    def __load_model(self, model_pkl_file):
+        if os.path.exists(f"models/{model_pkl_file}"):
+            loaded_model = pickle.load(open(f"models/{model_pkl_file}", 'rb'))
+            #when(loaded_model).predict(ANY).thenReturn(np.array([0]))
             return loaded_model
-        except Exception as e:
+        elif "base" in model_pkl_file:
+            return xgb.XGBClassifier(random_state=1, learning_rate=0.01)
+        else:
             return None
